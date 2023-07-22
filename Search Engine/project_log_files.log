@@ -1,0 +1,5 @@
+2023-05-08 16:24:54,309 - my_logger - DEBUG - Debug message
+2023-05-08 16:24:54,310 - my_logger - INFO - Info message
+2023-05-08 16:24:54,310 - my_logger - WARNING - Warning message
+2023-05-08 16:24:54,310 - my_logger - ERROR - Error message
+2023-05-08 16:24:54,310 - my_logger - CRITICAL - Critical message
