@@ -1,4 +1,4 @@
-# Custom Search Engine (June 2023)
+# Custom Search Engine
 
 This project is a custom search engine developed using Flask, HTML, and CSS, integrating Google, Bing, and Yahoo search APIs. It aims to provide efficient and enhanced search capabilities by leveraging various algorithms and metrics for refining search result rankings and improving the user experience.
 
@@ -27,10 +27,8 @@ This project is a custom search engine developed using Flask, HTML, and CSS, int
 To run the custom search engine locally:
 
 1. Clone this repository to your local machine.
-2. Install the required dependencies specified in the `requirements.txt` file.
-3. Set up a MySQL database according to the provided database architecture.
-4. Run the Flask application.
-5. Access the search engine through the provided URL.
+2. Run the Flask application.
+3. Access the search engine through the provided URL.
 
 ## Contribution
 
