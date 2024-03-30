@@ -1,229 +1,213 @@
 import requests
-import re
 from bs4 import BeautifulSoup
+import sqlite3
+import aiohttp
+import asyncio
+import async_timeout
 import urllib.parse
-from urllib.parse import urlparse
-from PyPDF2 import PdfReader
-import pytesseract
-import io
+import sys
+import copy 
+from functools import reduce 
 
-# Define the search engines and their URL format
-search_engines = {
-    "google": "https://www.google.com/search?q=",
-    "bing": "https://www.bing.com/search?q=",
-    "yahoo": "https://search.yahoo.com/search?p="
-}
+# Define search engines and block lists
+search_engines = {'Google': 'https://www.google.com/search?q=',
+                  'DuckDuckGo': 'https://duckduckgo.com/html/?q=',
+                  'Bing': 'https://www.bing.com/search?q=',
+                  'Yahoo': 'https://search.yahoo.com/search?p=',
+                  'Yandex': 'https://yandex.com/search/?text='}
+js_engines = ['DuckDuckGo']  # Engines that require JavaScript rendering
+block_list = ['cdn-cgi', '/cdn-cgi/', 'javascript:', '#', '.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx', '.svg', '.jpg', '.jpeg', '.png', '.gif']
+ad_block_list = ['ad', 'ads', 'banner', 'popup', 'doubleclick']  # Common ad-related terms to block
 
-def perform_ocr_on_pdf(pdf_data):
-    try:
-        with io.BytesIO(pdf_data) as pdf_file:
-            pdf_reader = PdfReader(pdf_file)
-            text = ''
-            for page in pdf_reader.pages:
-                text += page.extract_text()
-            paragraphs = text.split('\n\n')
-            return '\n\n'.join(paragraphs[:2]).encode('utf-8')
-    except Exception as e:
-        print("An error occurred while trying to extract text from the PDF:", e)
-        return None
+# Special logic for JavaScript handling in DuckDuckGo
+def get_js_soup(url):
+    # Import selenium only for search engines that load URLs via JavaScript
+    import selenium
+    from selenium import webdriver
+    try: 
+        # Define browser using Safari driver 
+        browser = webdriver.Safari()
+        # Request URL
+        browser.get(url)
+        # Get HTML from webpage
+        soup = BeautifulSoup(browser.page_source, 'html.parser')
+        # Quit browser 
+        browser.quit()
+        return soup
+    except selenium.common.exceptions.WebDriverException:
+        print('\nWebdriver Exception. Search engine option compatible with Safari only.\n')
+        sys.exit(1) 
 
-def extract_text_from_image(image_data):
-    try:
-        # Extract text from image using pytesseract
-        text = pytesseract.image_to_string(image_data, lang='eng')
-        paragraphs = text.split('\n\n')
-        return '\n\n'.join(paragraphs[:2]).encode('utf-8')
-    except Exception as e:
-        print("An error occurred while trying to extract text from the image:", e)
-        return None
-
-def filter_and_parse_results(response, engine, query):
-    soup = BeautifulSoup(response.text, 'html.parser')
-    results = []
-    
-    if engine == "google":
-        for i in soup.find_all('a', href=True):
-            url = i['href']
-            # Skip specific websites
-            if "accounts.google.com" in url or "support.google.com" in url:
-                continue
-            if url.startswith('/url?q='):
-                # Extract the URL and other relevant information
-                link = url.split('/url?q=')[1].split('&sa=U&')[0]
-                title_el = i.find('h3') or i.find('h2') or i.find('h1') or i.find('title')
-                if title_el:
-                    title = title_el.get_text()
-                else:
-                    domain = urlparse(link).netloc
-                    title = domain.split('.')[0].capitalize()
-    
-                # Perform the Google search
-                try:
-                    page = requests.get(link)
-                    soup = BeautifulSoup(page.content, "html.parser")
-    
-                    text_elements = soup.find_all("p")
-                    text_data = "\n".join([element.text.strip() for element in text_elements])
-                except Exception as e:
-                    print("An error occurred while processing the URL:", link)
-                    print("Error:", e)
-                    # Set the text_data to 'No Description' if an error occurs
-                    text_data = 'No Description'
-
-                # Check if the URL is a PDF or image
-                if link.endswith('.pdf'):
-                    info_type = 'PDF'
-                    try:
-                        # Extract text from PDF using OCR
-                        pdf_response = requests.get(link, stream=True)
-                        pdf_data = pdf_response.content
-                        ocr_response = perform_ocr_on_pdf(pdf_data)
-                        text_data = ocr_response.decode('utf-8')
-                        info_type = 'OCR_text'
-                    except:
-                        pass
-                elif link.endswith('.png') or link.endswith('.jpg') or link.endswith('.jpeg') or link.endswith('.gif'):
-                    info_type = 'Image'
-                    try:
-                        # Extract text from image using OCR
-                        image_response = requests.get(link, stream=True)
-                        image_data = image_response.content
-                        text_data = extract_text_from_image(image_data)
-                        info_type = 'OCR_text'
-                    except:
-                        pass
-                else:
-                    info_type = 'Text'
-
-                # Extract the domain name from the URL
-                domain_name = urlparse(link).netloc
-                domain_name = domain_name.split('www.')[-1].split('.')[0]
-
-                # Format the title
-                formatted_title = f"{domain_name}: {title}"
-
-                results.append((link, 'Google', len(query.split()), formatted_title, text_data, info_type))
-    
-    elif engine == 'bing':
-        search_engine_url = search_engines.get(engine)
-        headers = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"}
-        response = requests.get(search_engine_url + urllib.parse.quote(query), headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        for result in soup.find_all('li', {'class': 'b_algo'}):
-            url = result.find('a')['href']
-            title_el = result.find('a') or result.find('h2') or result.find('h1') or result.find('title')
-            if title_el:
-                title = title_el.get_text()
-            else:
-                domain = urlparse(url).netloc
-                domain_name = domain.split('www.')[-1].split('.')[0]
-                title = f"{domain_name.capitalize()}: {title}"
-            text_data_el = result.find('p')
-            if text_data_el:
-                text_data = text_data_el.get_text()
-            else:
-                text_data = 'No Description'
-            
-            # Set the info_type based on the URL type
-            if url.endswith('.pdf'):
-                info_type = 'PDF'
-                try:
-                    # Perform OCR on PDF
-                    pdf_data = requests.get(url).content
-                    ocr_response = perform_ocr_on_pdf(pdf_data)
-                    if ocr_response:
-                        # If OCR is successful, set info_type to OCR_text
-                        info_type = 'OCR_text'
-                        # Parse OCR text to store title and description separately
-                        decoded_data = ocr_response.decode('utf-8')
-                        title = re.findall(r"^(.*)\n", decoded_data)[0]
-                        text_data = re.findall(r"\n(.*)", decoded_data)[0]
-                except Exception as e:
-                    print("An error occurred while trying to extract text from the PDF:", e)
-                    # If OCR fails, just store the original text
-                    text_data = 'No Description'
-            elif url.endswith('.png') or url.endswith('.jpg') or url.endswith('.jpeg') or url.endswith('.gif'):
-                info_type = 'Image'
-                try:
-                    # Extract text from image using OCR
-                    img_response = requests.get(url, stream=True)
-                    img_data = img_response.content
-                    ocr_response = extract_text_from_image(img_data)
-                    if ocr_response:
-                        # If OCR is successful, set info_type to OCR_text
-                        info_type = 'OCR_text'
-                        text_data = ocr_response
-                except Exception as e:
-                    print("An error occurred while trying to extract text from the image:", e)
-                    text_data = 'No Description'
-            else:
-                info_type = 'Text'
-            
-            results.append((url, 'Bing', len(query.split()), title, text_data, info_type))
-    
-    elif engine == "yahoo":
-        search_engine_url = search_engines.get(engine)
-        response = requests.get(search_engine_url + urllib.parse.quote(query))
-        soup = BeautifulSoup(response.text, 'html.parser')
-        data_block = soup.findAll('div', class_=re.compile("dd algo algo-sr relsrch"))
-        for result in data_block:
-            title = result.find("h3", {"class": "title"}).text
-            link_yahoo = result.find('h3').a['href']
-            desc = result.find('div', class_='compText aAbs')
-            if desc is None:
-                desc = 'No Description'
-            else:
-                desc = desc.text
-    
-            # If title is empty, extract the domain name from the URL
-            if not title:
-                parsed_url = urlparse(link_yahoo)
-                title = parsed_url.netloc
-    
-            # Extract the domain name from the URL
-            domain_name = urlparse(link_yahoo).netloc
-            domain_name = domain_name.split('www.')[-1].split('.')[0]
-    
-            # Format the title
-            formatted_title = f"{domain_name.capitalize()}: {title}"
-    
-            # Determine the info type of the URL content
-            if link_yahoo.endswith('.pdf'):
-                # Download the PDF file
-                pdf_response = requests.get(link_yahoo)
-                pdf_data = pdf_response.content
-                # Perform OCR on the PDF file
-                try:
-                    ocr_response = perform_ocr_on_pdf(pdf_data)
-                    text_data = ocr_response.decode('utf-8') if ocr_response is not None else desc
-                    info_type = 'OCR_text'
-                except:
-                    text_data = desc
-                    info_type = 'PDF'
-            elif link_yahoo.endswith('.png') or link_yahoo.endswith('.jpg') or link_yahoo.endswith('.jpeg') or link_yahoo.endswith('.gif'):
-                info_type = 'Image'
-                try:
-                    # Extract text from image using OCR
-                    image_response = requests.get(link_yahoo, stream=True)
-                    image_data = image_response.content
-                    ocr_response = extract_text_from_image(image_data)
-                    if ocr_response:
-                        # If OCR is successful, set info_type to OCR_text
-                        info_type = 'OCR_text'
-                        text_data = ocr_response
-                    else:
-                        # If OCR fails, just store the original text
-                        text_data = desc
-                except Exception as e:
-                    print("An error occurred while trying to extract text from the image:", e)
-                    text_data = desc
-            else:
-                info_type = 'Text'
-                text_data = desc
-    
-            results.append((link_yahoo, 'Yahoo', len(query.split()), formatted_title, text_data, info_type))
-    
+# Filter function to clean up URL scrape results 
+def filter_function(url, block_list, ad_block_list):
+    # Check for "http"
+    if 'http' not in url: 
+        return False
+    # Check if included in block_list and ad_block_list
+    elif any(blocked in url for blocked in block_list) or any(blocked in url for blocked in ad_block_list):
+        return False
     else:
-        raise ValueError("Invalid search engine")
+        return True
     
-    return results
+# Additional data transformations for Google searches 
+def google_transformer(url):
+    return url.split('&sa=')[0]
+
+# Function for finding URLs resulted from search, with associated HTML clean up and filtering 
+# Return list of cleaned up URL 
+def urls(soup, engine):
+    # Find <a> tags used for links, where tags have href attribute from soup object
+    all_href = map(lambda x: x.get('href'), soup.find_all('a', href=True))
+    # Filter to URL links 
+    url = filter(lambda x: filter_function(x, block_list, ad_block_list), all_href)
+    # Additional filter for Google searches
+    if engine == 'Google':
+        url = map(google_transformer, url)
+    # Return cleaned up list of URLs 
+    return list(map(str, map(lambda x: x.strip('/url?q='), url)))
+
+# Remove duplicate domains from scraped URLs
+def remove_dup(urls):
+    # Dictionary to hold domain key and URL value 
+    new_urls = {}
+    # For each URL, check if domain is in dictionary 
+    for url in urls:
+        parts = urllib.parse.urlparse(url)
+        if parts.netloc not in new_urls:
+            # Add domain and URL into dictionary 
+            new_urls[parts.netloc] = url
+    # Return filtered URLs as a list 
+    return list(new_urls.values())
+
+# Get raw text from HTML resulting from engine scrape and get first title object in HTML
+def get_raw_text(text):
+    soup = BeautifulSoup(text, 'html.parser')
+    try: 
+        title = soup.title.get_text()
+    except AttributeError:
+        title = "N/A"
+    for script in soup(['script', 'style', 'template', 'TemplateString', 'ProcessingInstruction', 'Declaration', 'Doctype']):
+        script.extract()
+    text = [item.text.strip().replace(u'\xa0', u' ') for item in soup.find_all('p')]
+    return reduce(lambda x, y: x + ' ' + y, text, ''), title 
+
+# Async function to get HTML from URL 
+async def get_html(session, url):
+    # Get HTML text from session object 
+    try:
+        async with async_timeout.timeout(10):
+            async with session.get(url) as response:
+                return await response.text(), url
+    # If timeout, return "TimeoutError" and URL as tuple 
+    except asyncio.exceptions.TimeoutError:
+        return "Error: Timeout", url
+    # If invalid URL, return "InvalidURL" and URL as tuple 
+    except aiohttp.client_exceptions.InvalidURL:
+        return "Error: InvalidURL", url 
+    # If server disconnected, return "ServerDisconnected" and URL as tuple
+    except aiohttp.client_exceptions.ServerDisconnectedError:
+        return 'Error: ServerDisconnected', url 
+    except UnicodeDecodeError:
+        return 'Error: UnicodeDecodeError', url
+    except aiohttp.client_exceptions.ClientConnectorError:
+        return 'Error: ClientConnectorError', url
+    
+# Define tasks for the URLs 
+async def get_all(session, urls):
+    tasks = []
+    # For each URL, create a task to get HTML for the defined session object and URL 
+    for url in urls:
+        task = asyncio.create_task(get_html(session, url))
+        tasks.append(task)
+    # Return all the tasks 
+    results = await asyncio.gather(*tasks)
+    return results 
+
+# Define function to call async functions 
+async def async_main(urls):
+    # Context manager for aiohttp session object 
+    async with aiohttp.ClientSession() as session:
+        # Get data obtained from get_all with defined session object and URLs 
+        data = await get_all(session, urls)
+        # Return list of data, where each element is a tuple containing HTML, URL 
+        return data
+
+# Function for executing SQL queries
+def sql_execute(cursor, query, input, get_lastrowid=False):
+    cursor.execute(query, input)
+    if get_lastrowid: 
+        return cursor.lastrowid
+
+# Data filter to ensure content going into database is clean 
+def data_filter(query, title, text):
+    # Lowercase inputs 
+    query = query.lower()
+    title = title.lower()
+    text = text.lower()
+    # List for filtering 
+    data_filter = ['filter_word1', 'filter_word2']  # Define your filter words here
+    # If length of text is less than 50, then will not insert into DB, since it likely is a 404, JavaScript, etc. issue; also filter for words in data_filter
+    if len(text) < 50:
+        return True
+    # Check if any of the filter keywords are in the query. If so, remove those keywords from the filter list 
+    if any(term in query for term in data_filter):
+        for term in copy.deepcopy(data_filter):
+            if term in query:
+                data_filter.remove(term)
+    # Check if any of the remaining filter keywords are in the title, if so return false. Else return true
+    if any(term in title for term in data_filter):
+        return True
+    else:
+        return False 
+
+def populate_database(input_query, engine):
+    if engine not in js_engines:
+        # Request HTML from web search
+        r = requests.get(search_engines[engine] + input_query, headers={'user-agent': 'my-app/0.0.1'})
+        # Create BeautifulSoup object 
+        soup = BeautifulSoup(r.text, 'html.parser')
+    else:
+        # Use special handling for JavaScript 
+        soup = get_js_soup(search_engines[engine] + input_query)
+
+    # Get scraped URLs, while removing duplicate domains 
+    url_list = remove_dup(urls(soup, engine))
+
+    # Asynchronously get HTML text from URLs obtained via search engine scrape
+    text_url = asyncio.run(async_main(url_list))
+
+    # Return cleaned up text as a tuple with the URL
+    cleaned_text_url = map(lambda x: (get_raw_text(x[0]), x[1]), text_url)
+
+    # Opening connection to SQLite database
+    connection = sqlite3.connect('custom_search_engine.db')
+    # Creating cursor handler for inserting data 
+    cursor = connection.cursor()
+
+    # Query for adding search info
+    last_search_id = sql_execute(cursor, 'INSERT INTO searches (search_query, search_engine) VALUES (?, ?)', (input_query, engine), get_lastrowid=True)
+
+    # Inserting URL info
+    for text_title, url in cleaned_text_url:
+        # Unpack text_title 
+        text, title = text_title
+        # Additional filtering 
+        if data_filter(input_query, title, text):
+            continue
+        print("\nInserting URL info into 'search_results' table:")
+        print("URL:", url)
+        print("Last Search ID:", last_search_id)
+        print("Title:", title)
+        print("Description:", text)
+        # Restricting size of text for database constraint
+        if len(text) > 60000:
+            text = text[:60000]
+        # Execute query to add info to search engine tables
+        sql_execute(cursor, 'INSERT INTO search_results (url, id, title, description) VALUES (?, ?, ?, ?)', (url, last_search_id, title, text))
+            
+    # Commit data to database 
+    connection.commit()
+
+    # Closing cursor and connection 
+    cursor.close()
+    connection.close()
